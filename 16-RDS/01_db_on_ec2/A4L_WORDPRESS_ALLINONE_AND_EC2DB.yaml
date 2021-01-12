@@ -1,8 +1,8 @@
 
-Description:  Animals4Life base VPC Template + Boostrapped Wordpress
+Description:  Animals4Life base VPC Template + Boostrapped Wordpress + Empty MariaDB EC2
 Parameters:
   LatestAmiId:
-    Description: AMI for Wordpess Instance (default is latest AmaLinux2)
+    Description: AMI for Wordpess & DB Instance (default is latest AmaLinux2)
     Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
     Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
   DBName:
@@ -19,17 +19,15 @@ Parameters:
     Description: The WordPress database admin account password
     MaxLength: '41'
     MinLength: '8'
-    NoEcho: 'true'
     Type: String
-    Default: '4n1m4l$4L1f3'
+    Default: '4n1m4ls4L1f3'
   DBRootPassword:
     ConstraintDescription: must contain only alphanumeric characters.
     Description: MySQL root password
     MaxLength: '41'
     MinLength: '8'
-    NoEcho: 'true'
     Type: String
-    Default: '4n1m4l$4L1f3'
+    Default: '4n1m4ls4L1f3'
   DBUser:
     ConstraintDescription: must begin with a letter and contain only alphanumeric
       characters.
@@ -37,7 +35,6 @@ Parameters:
     Default: 'a4lwordpress'
     MaxLength: '16'
     MinLength: '1'
-    NoEcho: 'true'
     Type: String
 Resources:
   VPC:
@@ -374,7 +371,12 @@ Resources:
       Runtime: python2.7
       Role: !GetAtt IPv6WorkaroundRole.Arn
       Timeout: 30
-  PublicEC2:
+  WPEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      InstanceId: !Ref WordpressEC2
+  WordpressEC2:
     Type: AWS::EC2::Instance
     CreationPolicy:
       ResourceSignal:
@@ -442,7 +444,52 @@ Resources:
           touch /usr/share/collectd/types.db
           /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c ssm:${CWAgentConfig} -s
           # STEP 10 SIGNAL FINISH OF INSTALL & CONFIG
-          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource PublicEC2 --region ${AWS::Region}
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource WordpressEC2 --region ${AWS::Region}
+  MariaDBEC2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    Properties:
+      InstanceType: "t2.micro"
+      ImageId: !Ref LatestAmiId
+      IamInstanceProfile: !Ref WordpressInstanceProfile
+      SubnetId: !Ref SubnetWEBA
+      SecurityGroupIds: 
+        - !Ref InstanceSecurityGroup
+      Tags:
+        - Key: Name
+          Value: A4L-DB-Wordpress
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe      
+          # Begin Configuration
+          yum -y install mariadb-server wget cowsay
+          systemctl enable mariadb
+          systemctl start mariadb
+          yum -y update
+          rpm -Uvh https://s3.amazonaws.com/amazoncloudwatch-agent/amazon_linux/amd64/latest/amazon-cloudwatch-agent.rpm
+          mkdir -p /usr/share/collectd/
+          touch /usr/share/collectd/types.db
+          /opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c ssm:${CWAgentConfig} -s
+        
+          # DB setup
+          echo "CREATE DATABASE ${DBName};" >> /tmp/db.setup
+          echo "CREATE USER '${DBUser}' IDENTIFIED BY '${DBPassword}';" >> /tmp/db.setup
+          echo "GRANT ALL PRIVILEGES ON *.* TO '${DBUser}'@'%';" >> /tmp/db.setup
+          echo "FLUSH PRIVILEGES;" >> /tmp/db.setup
+          mysqladmin -u root password "${DBRootPassword}"
+          mysql -u root --password="${DBRootPassword}" < /tmp/db.setup
+          rm /tmp/db.setup
+        
+          # cowsay
+          echo "#!/bin/sh" > /etc/update-motd.d/40-cow
+          echo 'cowsay "Amazon Linux 2 AMI - Animals4Life"' > /etc/update-motd.d/40-cow
+          chmod 755 /etc/update-motd.d/40-cow
+          rm /etc/update-motd.d/30-banner
+          update-motd
+        
+          /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackId} --resource MariaDBEC2 --region ${AWS::Region}
   InstanceSecurityGroup:
     Type: 'AWS::EC2::SecurityGroup'
     Properties:
@@ -464,6 +511,14 @@ Resources:
           FromPort: '22'
           ToPort: '22'
           CidrIpv6: ::/0
+  InstanceSecurityGroupSelfReferenceRule:
+    Type: "AWS::EC2::SecurityGroupIngress"
+    Properties:
+      GroupId: !Ref InstanceSecurityGroup
+      IpProtocol: 'tcp'
+      FromPort: '0'
+      ToPort: '65535'
+      SourceSecurityGroupId: !Ref InstanceSecurityGroup
   WordpressRole:
     Type: 'AWS::IAM::Role'
     Properties:
